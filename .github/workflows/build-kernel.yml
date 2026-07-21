@@ -1,94 +1,60 @@
 name: Build Kernel with SukiSU Ultra
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [ lineage-22.2 ]
-
-env:
-  # 重点修改：仓库使用 owner/repo，不要完整链接
-  KERNEL_REPO: bao188520/android_kernel_nubia_msm8998
-  KERNEL_SOURCE_BRANCH: lineage-22.2
-  KERNEL_DEFCONFIG: lineageos_nx563j_defconfig
-  SOURCE_BOOT_IMAGE: https://github.com/bao188520/KernelSU_Action_nx563j/raw/refs/heads/master/boot/lineage-22.2-20260710-boot.img
-  SUKISU_MODE: main
-  OUTPUT_DIR: out
-  ARCH: arm64
-  CROSS_COMPILE: aarch64-linux-android-
+  workflow_dispatch: # 允许手动触发
 
 jobs:
-  build-kernel:
-    name: Build Kernel
-    runs-on: ubuntu-22.04
+  build:
+    runs-on: ubuntu-latest
     steps:
-      - name: 安装编译依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev \
-            git ccache curl wget zip gzip cpio lz4 \
-            gcc-aarch64-linux-gnu device-tree-compiler python3-pyelftools --no-install-recommends
+    - name: Checkout kernel source
+      uses: actions/checkout@v4
+      with:
+        repository: bao188520/android_kernel_nubia_msm8998
+        ref: lineage-22.2
+        path: kernel
 
-      - name: 检出内核源码
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.KERNEL_REPO }}
-          ref: ${{ env.KERNEL_SOURCE_BRANCH }}
-          path: kernel-source
-          fetch-depth: 0
+    - name: Checkout SukiSU Ultra
+      run: |
+        cd kernel
+        # 集成 SukiSU Ultra (内置构建方式)
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-      - name: 集成 SukiSU Ultra
-        working-directory: kernel-source
-        run: |
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ env.SUKISU_MODE }}
+    - name: Configure kernel
+      run: |
+        cd kernel
+        # 使用你的 defconfig 作为基础
+        make ARCH=arm64 lineageos_nx563j_defconfig
+        # 手动开启 SukiSU Ultra 所需的内核选项
+        scripts/config --file .config \
+          -e CONFIG_KPM \
+          -e CONFIG_KALLSYMS \
+          -e CONFIG_KALLSYMS_ALL
+        # 可选: 如果 KPROBES 未开启，可以尝试开启，这有助于 LKM 模式工作[reference:1]
+        # scripts/config --file .config -e CONFIG_KPROBES
 
-      - name: 内核配置并启用必需选项
-        working-directory: kernel-source
-        run: |
-          make ARCH=${{ env.ARCH }} ${{ env.KERNEL_DEFCONFIG }} O=${{ env.OUTPUT_DIR }}
-          sed -i 's/.*CONFIG_KPM.*/CONFIG_KPM=y/' ${{ env.OUTPUT_DIR }}/.config
-          sed -i 's/.*CONFIG_KALLSYMS.*/CONFIG_KALLSYMS=y/' ${{ env.OUTPUT_DIR }}/.config
-          sed -i 's/.*CONFIG_KALLSYMS_ALL.*/CONFIG_KALLSYMS_ALL=y/' ${{ env.OUTPUT_DIR }}/.config
-          grep -E 'CONFIG_KPM|CONFIG_KALLSYMS|CONFIG_KALLSYMS_ALL' ${{ env.OUTPUT_DIR }}/.config
+    - name: Build kernel
+      run: |
+        cd kernel
+        # 1. 设置交叉编译工具链 (请替换为你的工具链路径)
+        export CROSS_COMPILE=aarch64-linux-android-
+        # 2. 设置架构
+        export ARCH=arm64
+        # 3. 开始编译 (使用合适的线程数)
+        make -j$(nproc)
 
-      - name: 编译内核
-        working-directory: kernel-source
-        run: |
-          make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} -j$(nproc) O=${{ env.OUTPUT_DIR }}
+    # --- 从这里开始是打包 boot.img 的步骤，需要你根据内核实际输出定制 ---
+    - name: Pack boot image
+      run: |
+        # 假设编译产物是 arch/arm64/boot/Image.gz-dtb
+        # 你需要使用 mkbootimg 工具，将内核(zImage/dtb)与源 boot.img 的 ramdisk 打包
+        # 这是一个示例，请替换为正确的路径和参数
+        # mkbootimg --kernel kernel/arch/arm64/boot/Image.gz-dtb \
+        #           --ramdisk boot/ramdisk.img \
+        #           -o boot.img
 
-      - name: 准备bootimg工具 & 下载基准boot.img
-        run: |
-          mkdir -p bootimg-tools
-          cd bootimg-tools
-          wget ${{ env.SOURCE_BOOT_IMAGE }} -O source.boot.img
-          git clone https://github.com/pbatard/bootimg-tools.git .
-          make
-          sudo mv mkbootimg unpackbootimg /usr/local/bin/
-
-      - name: 打包新boot.img
-        run: |
-          mkdir -p bootimg-work
-          cd bootimg-work
-          unpackbootimg -i ../bootimg-tools/source.boot.img
-
-          KERNEL_IMAGE=$(find ../kernel-source/${{ env.OUTPUT_DIR }}/arch/${{ env.ARCH }}/boot/ -name "Image.gz-dtb" -o -name "Image")
-          if [ -z "$KERNEL_IMAGE" ];then
-            echo "ERROR: 找不到内核镜像 Image/Image.gz-dtb"
-            exit 1
-          fi
-
-          mkbootimg \
-            --kernel "${KERNEL_IMAGE}" \
-            --ramdisk ../bootimg-tools/source.boot.img-ramdisk.gz \
-            --cmdline "$(cat ../bootimg-tools/source.boot.img-cmdline)" \
-            --base "$(cat ../bootimg-tools/source.boot.img-base)" \
-            --pagesize "$(cat ../bootimg-tools/source.boot.img-pagesize)" \
-            -o new-boot.img
-
-          mv new-boot.img ../
-
-      - name: 上传成品boot.img
-        uses: actions/upload-artifact@v4
-        with:
-          name: sukiSU-boot-img
-          path: new-boot.img
-          if-no-files-found: error
+    - name: Upload boot image
+      uses: actions/upload-artifact@v4
+      with:
+        name: boot-with-sukisu.img
+        path: boot.img
