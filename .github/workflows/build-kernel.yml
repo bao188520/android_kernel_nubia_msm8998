@@ -2,7 +2,6 @@ name: Build Kernel with SukiSU Ultra for NX563J
 
 on:
   workflow_dispatch:
-    # 可选：允许手动指定分支（默认使用 lineagos-22.2）
     inputs:
       branch:
         description: '内核分支 (默认 lineage-22.2)'
@@ -11,7 +10,7 @@ on:
         type: string
 
 env:
-  # -------- 用户提供的变量 --------
+  # -------- 你的配置 --------
   KERNEL_SOURCE: https://github.com/bao188520/android_kernel_nubia_msm8998
   KERNEL_SOURCE_BRANCH: lineage-22.2
   KERNEL_DEFCONFIG: lineageos_nx563j_defconfig
@@ -25,7 +24,6 @@ env:
   SOURCE_BOOT_IMAGE: https://github.com/bao188520/KernelSU_Action_nx563j/raw/refs/heads/master/boot/lineage-22.2-20260710-boot.img
 
   # -------- 内部变量 --------
-  WORK_DIR: ${{ github.workspace }}
   KERNEL_DIR: ${{ github.workspace }}/kernel
   BOOT_DIR: ${{ github.workspace }}/boot_work
   CLANG_DIR: ${{ github.workspace }}/clang
@@ -35,7 +33,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      # 1. 检出内核源码（指定分支）
+      # 1. 检出内核源码
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
@@ -43,7 +41,7 @@ jobs:
           path: ${{ env.KERNEL_DIR }}
           ref: ${{ github.event.inputs.branch || env.KERNEL_SOURCE_BRANCH }}
 
-      # 2. 安装必需的系统依赖
+      # 2. 安装系统依赖
       - name: Install Dependencies
         run: |
           sudo apt-get update
@@ -51,21 +49,17 @@ jobs:
             git ccache make flex bison bc cpio \
             python3 python3-dev python3-pip \
             libssl-dev libelf-dev \
-            device-tree-compiler lz4 \
-            zstd \
+            device-tree-compiler lz4 zstd \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi \
             unzip wget
 
-      # 3. 下载预编译的 Clang/LLVM
-      - name: Download Clang
+      # 3. 使用 git clone 获取 Clang 预编译包（更可靠）
+      - name: Setup Clang
         run: |
-          mkdir -p ${{ env.CLANG_DIR }}
-          cd ${{ env.CLANG_DIR }}
-          # 使用 AOSP 预编译 Clang 的下载方式
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/${{ env.CLANG_VERSION }}/clang-${{ env.CLANG_VERSION }}.tar.gz
-          tar -xzf clang-${{ env.CLANG_VERSION }}.tar.gz
-          # 设置 PATH
+          git clone --depth 1 --branch ${{ env.CLANG_VERSION }} \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            ${{ env.CLANG_DIR }}
           echo "${{ env.CLANG_DIR }}/bin" >> $GITHUB_PATH
 
       # 4. 集成 SukiSU Ultra (LKM 模式)
@@ -74,21 +68,15 @@ jobs:
         run: |
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
 
-      # 5. 配置内核 (使用 defconfig + 启用必要选项)
+      # 5. 配置内核 (使用 defconfig + 启用必需选项)
       - name: Configure Kernel
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          # 生成默认配置
           make ${{ env.KERNEL_DEFCONFIG }}
-          
-          # 启用非 GKI 必需的选项
           scripts/config --enable KPM
           scripts/config --enable KALLSYMS
           scripts/config --enable KALLSYMS_ALL
-          # 确保 KernelSU 核心选项开启（即使脚本已加，确保生效）
           scripts/config --enable KSU
-          
-          # 处理依赖
           make olddefconfig
 
       # 6. 编译内核 (使用 Clang/LLVM)
@@ -96,43 +84,34 @@ jobs:
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           export PATH="${{ env.CLANG_DIR }}/bin:$PATH"
-          export LD=ld.lld
-          export LLVM=1
-          export LLVM_IAS=1
-          # 使用 ccache 加速 (可选)
-          export CC="ccache clang"
+          export LD=ld.lld LLVM=1 LLVM_IAS=1
           make -j$(nproc) \
             ARCH=${{ env.TARGET_ARCH }} \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
         env:
-          # 确保环境变量传递给 make
           LD: ld.lld
           LLVM: 1
           LLVM_IAS: 1
 
-      # 7. 准备打包环境 - 下载基础 boot.img
+      # 7. 下载基础 boot.img
       - name: Download base boot.img
         run: |
           mkdir -p ${{ env.BOOT_DIR }}
           wget -q -O ${{ env.BOOT_DIR }}/base-boot.img ${{ env.SOURCE_BOOT_IMAGE }}
 
-      # 8. 安装 Android 打包工具 (mkbootimg/unpackbootimg)
+      # 8. 安装打包工具
       - name: Install Android Tools
         run: |
           sudo apt-get install -y android-sdk-libsparse-utils
-          # 从 AOSP 预编译 mkbootimg（或使用 pip 安装）
           pip3 install --user mkbootimg
 
-      # 9. 拆包基础 boot.img 并替换内核
+      # 9. 拆包并替换内核，重新打包成 boot.img
       - name: Repack boot.img with new kernel
         working-directory: ${{ env.BOOT_DIR }}
         run: |
-          # 解包
           unpackbootimg -i base-boot.img -o extracted/
-          # 复制新内核
           cp ${{ env.KERNEL_DIR }}/arch/arm64/boot/${{ env.KERNEL_FILE }} extracted/kernel
-          # 重新打包
           mkbootimg \
             --kernel extracted/kernel \
             --ramdisk extracted/ramdisk \
@@ -145,10 +124,8 @@ jobs:
             --tags_offset $(cat extracted/tags_offset) \
             --cmdline "$(cat extracted/cmdline)" \
             -o boot-new.img
-          # 如果需要签名（这里忽略，BOOT_SIGNATURE 暂不实现，因为需私钥）
-          # 可预留签名步骤，但建议在刷机时手动签名或使用未签名版本
 
-      # 10. 可选：打包成 AnyKernel3 ZIP（供不同刷机方式选择）
+      # 10. 可选：打包 AnyKernel3 ZIP
       - name: Build AnyKernel3 ZIP
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ${{ env.ANY_KERNEL_DIR }}
@@ -156,7 +133,7 @@ jobs:
           cd ${{ env.ANY_KERNEL_DIR }}
           zip -r9 kernel-SukiSU-Ultra-$(date +%Y%m%d-%H%M%S).zip * -x .git README.md
 
-      # 11. 上传产物 (boot.img 和 AnyKernel3 ZIP)
+      # 11. 上传编译产物
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
