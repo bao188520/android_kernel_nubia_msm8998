@@ -1,135 +1,112 @@
-name: Build Kernel with SukiSU Ultra for NX563J
+name: Build Kernel with SukiSU Ultra
 
+# 触发条件配置
 on:
-  workflow_dispatch:
-    inputs:
-      branch:
-        description: '内核分支 (默认 lineage-22.2)'
-        required: false
-        default: 'lineage-22.2'
-        type: string
+  workflow_dispatch: # 保留手动触发的能力，便于平时测试构建
+  push:
+    branches: [ lineage-22.2 ]
+  pull_request:
+    branches: [ lineage-22.2 ]
 
+# 全局环境变量配置，用户需根据实际项目需求修改
 env:
-  # -------- 用户配置 --------
-  KERNEL_SOURCE: https://github.com/bao188520/android_kernel_nubia_msm8998
+  KERNEL_SOURCE_REPOSITORY: https://github.com/bao188520/android_kernel_nubia_msm8998
   KERNEL_SOURCE_BRANCH: lineage-22.2
   KERNEL_DEFCONFIG: lineageos_nx563j_defconfig
-  TARGET_ARCH: arm64
-  KERNEL_FILE: Image.gz-dtb
-  USE_KERNELSU: true
-  MAKE_BOOT_IMAGE: true
-  BOOT_SIGNATURE: true
   SOURCE_BOOT_IMAGE: https://github.com/bao188520/KernelSU_Action_nx563j/raw/refs/heads/master/boot/lineage-22.2-20260710-boot.img
-
-  # -------- 内部变量 --------
-  KERNEL_DIR: ${{ github.workspace }}/kernel
-  BOOT_DIR: ${{ github.workspace }}/boot_work
-  ANY_KERNEL_DIR: ${{ github.workspace }}/AnyKernel3
+  SUKISU_MODE: main # 非GKI设备使用main模式，即LKM模式
+  OUTPUT_DIR: out
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-android-
 
 jobs:
-  build:
+  build-kernel:
+    name: Build Kernel
     runs-on: ubuntu-22.04
     steps:
-      # 1. 检出内核源码（指定分支）
-      - name: Checkout Kernel Source
-        uses: actions/checkout@v4
-        with:
-          repository: bao188520/android_kernel_nubia_msm8998
-          path: ${{ env.KERNEL_DIR }}
-          ref: ${{ github.event.inputs.branch || env.KERNEL_SOURCE_BRANCH }}
+    - name: 安装依赖项
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev \
+          git ccache curl wget zip gzip cpio lz4 \
+          gcc-aarch64-linux-gnu device-tree-compiler \
+          python3-pyelftools --no-install-recommends
 
-      # 2. 安装系统依赖（包含 clang-15 和 lld-15）
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git ccache make flex bison bc cpio \
-            python3 python3-dev python3-pip \
-            libssl-dev libelf-dev \
-            device-tree-compiler lz4 zstd \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            clang-15 lld-15
-          # 创建符号链接，方便直接调用 clang 和 ld.lld
-          sudo ln -sf /usr/bin/clang-15 /usr/bin/clang
-          sudo ln -sf /usr/bin/lld-15 /usr/bin/ld.lld
+    - name: 检出内核源码
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.KERNEL_SOURCE_REPOSITORY }}
+        ref: ${{ env.KERNEL_SOURCE_BRANCH }}
+        path: kernel-source
+        fetch-depth: 0
 
-      # 3. 集成 SukiSU Ultra（LKM 模式）
-      - name: Integrate SukiSU Ultra
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+    - name: 集成 SukiSU Ultra
+      working-directory: kernel-source
+      run: |
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ env.SUKISU_MODE }}
 
-      # 4. 配置内核（使用 defconfig + 启用必需选项）
-      - name: Configure Kernel
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          make ARCH=${{ env.TARGET_ARCH }} ${{ env.KERNEL_DEFCONFIG }}
-          scripts/config --enable KPM
-          scripts/config --enable KALLSYMS
-          scripts/config --enable KALLSYMS_ALL
-          scripts/config --enable KSU
-          make ARCH=${{ env.TARGET_ARCH }} olddefconfig
+    - name: 配置内核
+      working-directory: kernel-source
+      run: |
+        make ARCH=${{ env.ARCH }} ${{ env.KERNEL_DEFCONFIG }}
+        # 启用SukiSU Ultra必需的内核配置项
+        sed -i 's/.*CONFIG_KPM.*/CONFIG_KPM=y/' .config
+        sed -i 's/.*CONFIG_KALLSYMS.*/CONFIG_KALLSYMS=y/' .config
+        sed -i 's/.*CONFIG_KALLSYMS_ALL.*/CONFIG_KALLSYMS_ALL=y/' .config
+        # 验证配置修改结果
+        grep -E 'CONFIG_KPM|CONFIG_KALLSYMS|CONFIG_KALLSYMS_ALL' .config
 
-      # 5. 编译内核（使用系统 Clang/LLVM）
-      - name: Build Kernel
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          export PATH="/usr/lib/ccache:$PATH"
-          make -j$(nproc) \
-            ARCH=${{ env.TARGET_ARCH }} \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            CC=clang \
-            LD=ld.lld \
-            LLVM=1 \
-            LLVM_IAS=1
+    - name: 编译内核
+      working-directory: kernel-source
+      run: |
+        make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} -j$(nproc) O=${{ env.OUTPUT_DIR }}
 
-      # 6. 下载基础 boot.img（用于重新打包）
-      - name: Download base boot.img
-        run: |
-          mkdir -p ${{ env.BOOT_DIR }}
-          wget -q -O ${{ env.BOOT_DIR }}/base-boot.img ${{ env.SOURCE_BOOT_IMAGE }}
+    - name: 准备 boot.img 工具
+      run: |
+        mkdir -p bootimg-tools
+        cd bootimg-tools
+        # 下载用户提供的官方基准boot.img
+        wget ${{ env.SOURCE_BOOT_IMAGE }} -O source.boot.img
+        # 编译安装bootimg解包/打包工具
+        git clone https://github.com/pbatard/bootimg-tools.git .
+        make
+        sudo mv mkbootimg unpackbootimg /usr/local/bin/
 
-      # 7. 安装 Android 打包工具
-      - name: Install Android Tools
-        run: |
-          sudo apt-get install -y android-sdk-libsparse-utils
-          pip3 install --user mkbootimg
+    - name: 打包新的 boot.img
+      run: |
+        mkdir -p bootimg-work
+        cd bootimg-work
+        # 解包官方基准boot.img
+        unpackbootimg -i ../bootimg-tools/source.boot.img
+        # 定位编译完成的内核镜像文件
+        KERNEL_IMAGE=$(find ../kernel-source/${{ env.OUTPUT_DIR }}/arch/${{ env.ARCH }}/boot/ -name "Image.gz-dtb" -o -name "Image")
+        if [ -z "$KERNEL_IMAGE" ]; then
+          echo "错误：在内核编译输出目录中未找到任何内核镜像文件，请检查内核编译日志。"
+          exit 1
+        fi
+        # 重新打包生成新的boot.img
+        mkbootimg \
+          --kernel "${KERNEL_IMAGE}" \
+          --ramdisk ../bootimg-tools/source.boot.img-ramdisk.gz \
+          --cmdline "$(cat ../bootimg-tools/source.boot.img-cmdline)" \
+          --base "$(cat ../bootimg-tools/source.boot.img-base)" \
+          --pagesize "$(cat ../bootimg-tools/source.boot.img-pagesize)" \
+          -o new-boot.img
+        # 移动生成的文件到顶层目录，方便后续上传
+        mv new-boot.img ../
 
-      # 8. 拆包并替换内核，重新生成 boot.img
-      - name: Repack boot.img with new kernel
-        working-directory: ${{ env.BOOT_DIR }}
-        run: |
-          unpackbootimg -i base-boot.img -o extracted/
-          cp ${{ env.KERNEL_DIR }}/arch/arm64/boot/${{ env.KERNEL_FILE }} extracted/kernel
-          mkbootimg \
-            --kernel extracted/kernel \
-            --ramdisk extracted/ramdisk \
-            --dtb extracted/dtb \
-            --dtb_offset $(cat extracted/dtb_offset) \
-            --base $(cat extracted/base) \
-            --pagesize $(cat extracted/pagesize) \
-            --kernel_offset $(cat extracted/kernel_offset) \
-            --ramdisk_offset $(cat extracted/ramdisk_offset) \
-            --tags_offset $(cat extracted/tags_offset) \
-            --cmdline "$(cat extracted/cmdline)" \
-            -o boot-new.img
+    - name: 上传集成SukiSU的boot.img
+      uses: actions/upload-artifact@v4
+      with:
+        name: sukiSU-integrated-boot-img
+        path: new-boot.img
+        if-no-files-found: error # 如果文件不存在，报错并终止
 
-      # 9. 打包 AnyKernel3 ZIP（备选刷机包）
-      - name: Build AnyKernel3 ZIP
-        run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ${{ env.ANY_KERNEL_DIR }}
-          cp ${{ env.KERNEL_DIR }}/arch/arm64/boot/${{ env.KERNEL_FILE }} ${{ env.ANY_KERNEL_DIR }}/
-          cd ${{ env.ANY_KERNEL_DIR }}
-          zip -r9 kernel-SukiSU-Ultra-$(date +%Y%m%d-%H%M%S).zip * -x .git README.md
-
-      # 10. 上传编译产物（boot.img 和 AnyKernel3 ZIP）
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: NX563J-Kernel-SukiSU-Ultra
-          path: |
-            ${{ env.BOOT_DIR }}/boot-new.img
-            ${{ env.ANY_KERNEL_DIR }}/*.zip
-          retention-days: 7
+    - name: 上传完整的内核编译产物
+      uses: actions/upload-artifact@v4
+      with:
+        name: full-kernel-build-artifacts
+        path: |
+          kernel-source/${{ env.OUTPUT_DIR }}/arch/${{ env.ARCH }}/boot/
+          !kernel-source/${{ env.OUTPUT_DIR }}/arch/${{ env.ARCH }}/boot/*.ko
+        if-no-files-found: warn
