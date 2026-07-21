@@ -16,7 +16,7 @@ env:
   KERNEL_DEFCONFIG: lineageos_nx563j_defconfig
   TARGET_ARCH: arm64
   KERNEL_FILE: Image.gz-dtb
-  CLANG_VERSION: r487747c
+  CLANG_VERSION: clang-r487747c   # 改为完整的标签名
   EXTRA_BUILD_COMMAND: LD=ld.lld LLVM=1 LLVM_IAS=1
   USE_KERNELSU: true
   MAKE_BOOT_IMAGE: true
@@ -54,7 +54,7 @@ jobs:
             gcc-arm-linux-gnueabi \
             unzip wget
 
-      # 3. 使用 git clone 获取 Clang 预编译包（更可靠）
+      # 3. 获取 Clang（使用正确的标签 clang-r487747c）
       - name: Setup Clang
         run: |
           git clone --depth 1 --branch ${{ env.CLANG_VERSION }} \
@@ -125,7 +125,7 @@ jobs:
             --cmdline "$(cat extracted/cmdline)" \
             -o boot-new.img
 
-      # 10. 可选：打包 AnyKernel3 ZIP
+      # 10. 打包 AnyKernel3 ZIP
       - name: Build AnyKernel3 ZIP
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ${{ env.ANY_KERNEL_DIR }}
