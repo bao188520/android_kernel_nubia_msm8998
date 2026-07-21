@@ -1,0 +1,47 @@
+name: Check Kprobe Kernel Config
+on:
+  push:
+    branches: [ lineage-22.2 ]
+  pull_request:
+    branches: [ lineage-22.2 ]
+  workflow_dispatch: # 支持手动触发
+
+jobs:
+  check-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: lineage-22.2
+
+      - name: Check kprobe related configs
+        run: |
+          DEF_PATH="arch/arm64/configs/lineageos_nx563j_defconfig"
+          echo "File path: $DEF_PATH"
+
+          # 需要校验的配置列表
+          REQUIRED=(
+            "CONFIG_HAVE_KPROBES=y"
+            "CONFIG_KPROBES=y"
+            "CONFIG_KPROBE_EVENTS=y"
+          )
+
+          FAIL=0
+          for cfg in "${REQUIRED[@]}"; do
+            if grep -q "^$cfg" "$DEF_PATH"; then
+              echo "✅ Found: $cfg"
+            else
+              echo "❌ Missing or not set: $cfg"
+              FAIL=1
+            fi
+          done
+
+          if [ $FAIL -ne 0 ]; then
+            echo "======================"
+            echo "Some kprobe config missing!"
+            exit 1
+          else
+            echo "======================"
+            echo "All required kprobe config present!"
+          fi
