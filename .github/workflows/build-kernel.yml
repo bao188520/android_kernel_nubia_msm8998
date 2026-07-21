@@ -10,7 +10,7 @@ on:
         type: string
 
 env:
-  # -------- 你的配置 --------
+  # -------- 用户配置 --------
   KERNEL_SOURCE: https://github.com/bao188520/android_kernel_nubia_msm8998
   KERNEL_SOURCE_BRANCH: lineage-22.2
   KERNEL_DEFCONFIG: lineageos_nx563j_defconfig
@@ -30,7 +30,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      # 1. 检出内核源码
+      # 1. 检出内核源码（指定分支）
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
@@ -38,7 +38,7 @@ jobs:
           path: ${{ env.KERNEL_DIR }}
           ref: ${{ github.event.inputs.branch || env.KERNEL_SOURCE_BRANCH }}
 
-      # 2. 安装系统依赖 (包含 clang)
+      # 2. 安装系统依赖（包含 clang-15 和 lld-15）
       - name: Install Dependencies
         run: |
           sudo apt-get update
@@ -49,29 +49,29 @@ jobs:
             device-tree-compiler lz4 zstd \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi \
-            clang-15 lld-15   # 安装 Clang 和 LLD
-          # 创建符号链接，让系统找到 clang 和 ld.lld
+            clang-15 lld-15
+          # 创建符号链接，方便直接调用 clang 和 ld.lld
           sudo ln -sf /usr/bin/clang-15 /usr/bin/clang
           sudo ln -sf /usr/bin/lld-15 /usr/bin/ld.lld
 
-      # 3. 集成 SukiSU Ultra (LKM 模式)
+      # 3. 集成 SukiSU Ultra（LKM 模式）
       - name: Integrate SukiSU Ultra
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
 
-      # 4. 配置内核 (使用 defconfig + 启用必需选项)
+      # 4. 配置内核（使用 defconfig + 启用必需选项）
       - name: Configure Kernel
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          make ${{ env.KERNEL_DEFCONFIG }}
+          make ARCH=${{ env.TARGET_ARCH }} ${{ env.KERNEL_DEFCONFIG }}
           scripts/config --enable KPM
           scripts/config --enable KALLSYMS
           scripts/config --enable KALLSYMS_ALL
           scripts/config --enable KSU
-          make olddefconfig
+          make ARCH=${{ env.TARGET_ARCH }} olddefconfig
 
-      # 5. 编译内核 (使用系统 Clang/LLVM)
+      # 5. 编译内核（使用系统 Clang/LLVM）
       - name: Build Kernel
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
@@ -85,19 +85,19 @@ jobs:
             LLVM=1 \
             LLVM_IAS=1
 
-      # 6. 下载基础 boot.img
+      # 6. 下载基础 boot.img（用于重新打包）
       - name: Download base boot.img
         run: |
           mkdir -p ${{ env.BOOT_DIR }}
           wget -q -O ${{ env.BOOT_DIR }}/base-boot.img ${{ env.SOURCE_BOOT_IMAGE }}
 
-      # 7. 安装打包工具
+      # 7. 安装 Android 打包工具
       - name: Install Android Tools
         run: |
           sudo apt-get install -y android-sdk-libsparse-utils
           pip3 install --user mkbootimg
 
-      # 8. 拆包并替换内核，重新打包成 boot.img
+      # 8. 拆包并替换内核，重新生成 boot.img
       - name: Repack boot.img with new kernel
         working-directory: ${{ env.BOOT_DIR }}
         run: |
@@ -116,7 +116,7 @@ jobs:
             --cmdline "$(cat extracted/cmdline)" \
             -o boot-new.img
 
-      # 9. 打包 AnyKernel3 ZIP
+      # 9. 打包 AnyKernel3 ZIP（备选刷机包）
       - name: Build AnyKernel3 ZIP
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ${{ env.ANY_KERNEL_DIR }}
@@ -124,7 +124,7 @@ jobs:
           cd ${{ env.ANY_KERNEL_DIR }}
           zip -r9 kernel-SukiSU-Ultra-$(date +%Y%m%d-%H%M%S).zip * -x .git README.md
 
-      # 10. 上传编译产物
+      # 10. 上传编译产物（boot.img 和 AnyKernel3 ZIP）
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
