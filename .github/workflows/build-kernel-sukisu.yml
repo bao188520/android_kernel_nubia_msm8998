@@ -1,11 +1,11 @@
-name: Build SukiSU Ultra NX563J msm8998
+name: Build SukiSU Ultra Kernel NX563J msm8998
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 手动触发编译
   push:
-    branches: [ lineage-22.2 ]
+    branches: [ lineage-22.2 ] # 内核对应分支
 
 env:
-  # 你的原始参数 完全保留
+  # 完全沿用你原配置参数，无需修改
   KERNEL_SOURCE: https://github.com/bao188520/android_kernel_nubia_msm8998
   KERNEL_SOURCE_BRANCH: lineage-22.2
   KERNEL_DEFCONFIG: lineageos_nx563j_defconfig
@@ -13,33 +13,33 @@ env:
   KERNEL_FILE: Image.gz-dtb
   CLANG_VERSION: r487747c
   SOURCE_BOOT_IMAGE: https://github.com/bao188520/KernelSU_Action_nx563j/raw/refs/heads/master/boot/lineage-22.2-20260710-boot.img
-  EXTRA_MAKE_FLAGS: LD=ld.lld LLVM=1 LLVM_IAS=1
-  SUKISU_MODE: lkm # lkm / builtin
-  TOOLCHAIN_DIR: ${{ github.workspace }}/clang-toolchain
+  EXTRA_ARGS: LD=ld.lld LLVM=1 LLVM_IAS=1
+  # SukiSU 专用环境变量
+  SUKISU_BUILD_MODE: lkm # 可选builtin，老旧内核切换builtin
 
 jobs:
-  build_kernel:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: 系统依赖安装
+      - name: 基础环境依赖安装
         run: |
           sudo apt update -y
-          sudo apt install -y git ccache flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev liblz4-tool make bc libelf-dev libncurses-dev python3 python3-pip dtc cpio squashfs-tools wget unzip
+          sudo apt install -y git ccache flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev liblz4-tool make bc libelf-dev libncurses5-dev python3 python3-pip dtc cpio squashfs-tools wget unzip
           pip install pycryptodome
 
-      - name: 克隆内核源码
+      - name: 拉取内核源码
         run: |
-          git clone --depth 1 -b $KERNEL_SOURCE_BRANCH $KERNEL_SOURCE kernel
+          git clone --depth=1 -b $KERNEL_SOURCE_BRANCH $KERNEL_SOURCE kernel
           cd kernel
 
-      - name: 集成 SukiSU Ultra 驱动
+      - name: 集成 SukiSU Ultra 内核驱动（核心步骤）
         run: |
           cd kernel
-          # 官方集成脚本
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s $SUKISU_MODE
-          # 追加必须内核配置
+          # 官方一键集成脚本，lkm模块模式
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s $SUKISU_BUILD_MODE
+          # 自动追加SukiSU必需内核配置到defconfig
           cat >> arch/$TARGET_ARCH/configs/$KERNEL_DEFCONFIG << EOF
-# SukiSU Mandatory Config
+# SukiSU Ultra Required Config
 CONFIG_KPM=y
 CONFIG_KALLSYMS=y
 CONFIG_KALLSYMS_ALL=y
@@ -57,66 +57,60 @@ CONFIG_FUNCTION_GRAPH_TRACER=y
 CONFIG_SYSFS=y
 CONFIG_PROC_FS=y
 EOF
-          # 注入sukisu编译条目
+          # 注入sukisu驱动编译条目到内核根Makefile
           sed -i '/core-y += kernel\/ mm\/ fs\/ ipc\/ security\/ crypto\/ block\//a obj-y += sukisu/' Makefile
 
-      - name: 下载预编译AOSP Clang r487747c（替代编译llvm，大幅提速）
+      - name: 下载对应Clang编译器 r487747c
         run: |
-          mkdir -p $TOOLCHAIN_DIR
-          cd $TOOLCHAIN_DIR
-          # Google官方预编译clang，无需本地编译llvm，规避编译耗时+报错
-          wget https://dl.google.com/android/ndk/android-ndk-r25c-linux.zip -O ndk.zip
-          unzip -q ndk.zip
-          mv android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/* ./
-          echo "$TOOLCHAIN_DIR/bin" >> $GITHUB_PATH
-          export PATH=$TOOLCHAIN_DIR/bin:$PATH
+          git clone https://github.com/llvm/llvm-project clang --depth=1 -b llvmorg-$CLANG_VERSION
+          cd clang
+          mkdir build && cd build
+          cmake -DCMAKE_INSTALL_PREFIX=../toolchain -DLLVM_ENABLE_PROJECTS="clang;lld;compiler-rt" -DCMAKE_BUILD_TYPE=Release ../llvm
+          make -j$(nproc) install
+          echo "$GITHUB_WORKSPACE/clang/toolchain/bin" >> $GITHUB_PATH
 
-      - name: CCache 编译缓存
+      - name: 启用CCache加速编译
         run: |
-          echo "CCACHE_DIR=${{ github.workspace }}/ccache" >> $GITHUB_ENV
-          ccache -M 12G
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/ccache" >> $GITHUB_ENV
+          echo "PATH=$GITHUB_WORKSPACE/ccache:$PATH" >> $GITHUB_ENV
+          ccache -M 10G
 
       - name: 编译内核 Image.gz-dtb
         run: |
           cd kernel
           export ARCH=$TARGET_ARCH
           export SUBARCH=$TARGET_ARCH
-          export PATH=$TOOLCHAIN_DIR/bin:$PATH
           make $KERNEL_DEFCONFIG
-          make -j$(nproc) $EXTRA_MAKE_FLAGS $KERNEL_FILE
+          make -j$(nproc) $EXTRA_ARGS $KERNEL_FILE
 
-      - name: 下载原厂boot.img & 解包打包工具
+      - name: 下载原厂基准boot.img打包
         run: |
-          # 下载基准boot
           wget $SOURCE_BOOT_IMAGE -O stock_boot.img
-          # 克隆mkbootimg工具
           git clone https://github.com/osm0sis/mkbootimg mkboot
-          cp kernel/arch/$TARGET_ARCH/boot/$KERNEL_FILE mkboot/
+          cp kernel/arch/$TARGET_ARCH/boot/$KERNEL_FILE ./mkboot/
           cd mkboot
+          # 解包原厂boot提取ramdisk、cmdline、dtb、boot头参数
           python3 unpackbootimg -i ../stock_boot.img -o boot_unpack
+          # 重新打包新内核boot.img
+          python3 mkbootimg --kernel $KERNEL_FILE --ramdisk boot_unpack/ramdisk.cpio.gz --cmdline "$(cat boot_unpack/cmdline)" --base $(cat boot_unpack/base) --pagesize $(cat boot_unpack/pagesize) --second_offset $(cat boot_unpack/second_offset) --tags_offset $(cat boot_unpack/tags_offset) -o suki-boot.img
 
-      - name: 打包全新boot.img
+      - name: 签名boot镜像（BOOT_SIGNATURE功能）
         run: |
           cd mkboot
-          BASE=$(cat boot_unpack/base)
-          PAGESIZE=$(cat boot_unpack/pagesize)
-          CMDLINE=$(cat boot_unpack/cmdline)
-          SECOND=$(cat boot_unpack/second_offset)
-          TAGS=$(cat boot_unpack/tags_offset)
-          RAMDISK=boot_unpack/ramdisk.cpio.gz
-          python3 mkbootimg --kernel $KERNEL_FILE --ramdisk $RAMDISK --cmdline "$CMDLINE" --base $BASE --pagesize $PAGESIZE --second_offset $SECOND --tags_offset $TAGS -o suki-boot.img
+          git clone https://github.com/osm0sis/avbtool avb
+          python3 avb/avbtool sign_partition --partition_name boot --image suki-boot.img --output suki-boot-signed.img
 
-      - name: 生成AnyKernel3刷机包
+      - name: 打包AnyKernel3刷机包（TWRP直刷）
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 anykernel
-          cp mkboot/suki-boot.img anykernel/boot.img
+          cp mkboot/suki-boot-signed.img anykernel/boot.img
           cd anykernel
-          zip -r SukiSU-NX563J-Lineage22.2.zip *
+          zip -r SukiSU-Ultra-NX563J-Lineage22.2.zip *
 
-      - name: 上传编译产物
+      - name: 上传成品文件
         uses: actions/upload-artifact@v4
         with:
-          name: SukiSU-Ultra-Kernel
+          name: SukiSU-Kernel-NX563J
           path: |
-            mkboot/suki-boot.img
-            anykernel/SukiSU-NX563J-Lineage22.2.zip
+            mkboot/suki-boot-signed.img
+            anykernel/SukiSU-Ultra-NX563J-Lineage22.2.zip
